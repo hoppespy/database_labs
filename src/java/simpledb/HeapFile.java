@@ -14,12 +14,14 @@ import java.util.*;
  * @author Sam Madden
  */
 public class HeapFile implements DbFile {
-    private File file;
-    private TupleDesc tupleDesc;
-    private BufferPool bufferPool;
+
+    private final File file;
+    private final TupleDesc tupleDesc;
+
+    private final BufferPool bufferPool;
     /**
      * Constructs a heap file backed by the specified file.
-     * 
+     *
      * @param f
      *            the file that stores the on-disk backing store for this heap
      *            file.
@@ -33,7 +35,7 @@ public class HeapFile implements DbFile {
 
     /**
      * Returns the File backing this HeapFile on disk.
-     * 
+     *
      * @return the File backing this HeapFile on disk.
      */
     public File getFile() {
@@ -43,51 +45,52 @@ public class HeapFile implements DbFile {
 
     /**
      * Returns an ID uniquely identifying this HeapFile. Implementation note:
-     * you will need to generate this tableid somewhere ensure that each
+     * you will need to generate this tableid somewhere to ensure that each
      * HeapFile has a "unique id," and that you always return the same value for
      * a particular HeapFile. We suggest hashing the absolute file name of the
      * file underlying the heapfile, i.e. f.getAbsoluteFile().hashCode().
-     * 
+     *
      * @return an ID uniquely identifying this HeapFile.
      */
     public int getId() {
         // some code goes here
+        // throw new UnsupportedOperationException("implement this");
         return this.file.getAbsolutePath().hashCode();
-        //throw new UnsupportedOperationException("implement this");
     }
 
     /**
      * Returns the TupleDesc of the table stored in this DbFile.
-     * 
+     *
      * @return TupleDesc of this DbFile.
      */
     public TupleDesc getTupleDesc() {
         // some code goes here
+        // throw new UnsupportedOperationException("implement this");
         return this.tupleDesc;
-        //throw new UnsupportedOperationException("implement this");
     }
 
     // see DbFile.java for javadocs
     public Page readPage(PageId pid) {
         // some code goes here
+        // 计算page对应的偏移量
         int pageSize = BufferPool.getPageSize();
         int pageNumber = pid.pageNumber();
-        int offset = pageSize*pageNumber;
+        int offset = pageSize * pageNumber;
+        // 初始化空Page
         Page page = null;
         RandomAccessFile randomAccessFile = null;
         try {
-            randomAccessFile = new RandomAccessFile(file,"r");
+            randomAccessFile = new RandomAccessFile(file, "r");
             byte[] data = new byte[pageSize];
             randomAccessFile.seek(offset);
             randomAccessFile.read(data);
-            page = new HeapPage((HeapPageId) pid, data);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }finally {
+            page = new HeapPage(((HeapPageId) pid), data);
+        } catch (IOException e) {
+            e.printStackTrace();
+        } finally {
             try {
                 randomAccessFile.close();
-            }catch (Exception e){
-
+            } catch (IOException e) {
                 e.printStackTrace();
             }
         }
@@ -124,15 +127,40 @@ public class HeapFile implements DbFile {
     public ArrayList<Page> insertTuple(TransactionId tid, Tuple t)
             throws DbException, IOException, TransactionAbortedException {
         // some code goes here
-        return null;
+        List<Page> modified = new ArrayList<>();
+        for (int i = 0; i < numPages(); i++) {
+            HeapPage page = (HeapPage) bufferPool.getPage(tid, new HeapPageId(this.getId(), i), Permissions.READ_WRITE);
+            if (page.getNumEmptySlots() == 0) {
+
+                continue;
+            }
+            page.insertTuple(t);
+            modified.add(page);
+            return (ArrayList<Page>) modified;
+        }
+        // 当所有的页都满时,我们需要创建新的页并写入文件中
+        BufferedOutputStream outputStream = new BufferedOutputStream(new FileOutputStream(file, true));
+        byte[] emptyPageData = HeapPage.createEmptyPageData();
+        // 向文件末尾添加数据
+        outputStream.write(emptyPageData);
+        outputStream.close();
+        // 加载到缓存中,使用numPages() - 1是因为此时numPages()已经变为插入后的大小了
+        HeapPage page = (HeapPage) bufferPool.getPage(tid, new HeapPageId(getId(), numPages() - 1), Permissions.READ_WRITE);
+        page.insertTuple(t);
+        modified.add(page);
+        return (ArrayList<Page>) modified;
         // not necessary for lab1
     }
 
     // see DbFile.java for javadocs
     public ArrayList<Page> deleteTuple(TransactionId tid, Tuple t) throws DbException,
-            TransactionAbortedException {
+            TransactionAbortedException, IOException {
         // some code goes here
-        return null;
+        HeapPage page = (HeapPage) bufferPool.getPage(tid, t.getRecordId().getPageId(), Permissions.READ_WRITE);
+        page.deleteTuple(t);
+        ArrayList<Page> modified = new ArrayList<>();
+        modified.add(page);
+        return modified;
         // not necessary for lab1
     }
 
@@ -210,6 +238,6 @@ public class HeapFile implements DbFile {
         }
     }
 
-
 }
+
 
