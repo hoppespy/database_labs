@@ -11,18 +11,18 @@ import javax.swing.tree.*;
  * logical plan.
  */
 public class JoinOptimizer {
-    LogicalPlan p;
-    Vector<LogicalJoinNode> joins;
+    final LogicalPlan p;
+    final List<LogicalJoinNode> joins;
 
     /**
      * Constructor
-     * 
+     *
      * @param p
      *            the logical plan being optimized
      * @param joins
      *            the list of joins being performed
      */
-    public JoinOptimizer(LogicalPlan p, Vector<LogicalJoinNode> joins) {
+    public JoinOptimizer(LogicalPlan p, List<LogicalJoinNode> joins) {
         this.p = p;
         this.joins = joins;
     }
@@ -34,7 +34,7 @@ public class JoinOptimizer {
      * inner/outer here -- because DbIterator's don't provide any cardinality
      * estimates, and stats only has information about the base tables. For this
      * reason, the plan1
-     * 
+     *
      * @param lj
      *            The join being considered
      * @param plan1
@@ -43,7 +43,7 @@ public class JoinOptimizer {
      *            The right join node's child
      */
     public static DbIterator instantiateJoin(LogicalJoinNode lj,
-            DbIterator plan1, DbIterator plan2) throws ParsingException {
+                                             DbIterator plan1, DbIterator plan2) throws ParsingException {
 
         int t1id = 0, t2id = 0;
         DbIterator j;
@@ -68,7 +68,21 @@ public class JoinOptimizer {
 
         JoinPredicate p = new JoinPredicate(t1id, lj.p, t2id);
 
-        j = new Join(p,plan1,plan2);
+        if (lj.p == Predicate.Op.EQUALS) {
+
+            try {
+                // dynamically load HashEquiJoin -- if it doesn't exist, just
+                // fall back on regular join
+                Class<?> c = Class.forName("simpledb.execution.HashEquiJoin");
+                java.lang.reflect.Constructor<?> ct = c.getConstructors()[0];
+                j = (DbIterator) ct
+                        .newInstance(new Object[] { p, plan1, plan2 });
+            } catch (Exception e) {
+                j = new Join(p, plan1, plan2);
+            }
+        } else {
+            j = new Join(p, plan1, plan2);
+        }
 
         return j;
 
@@ -76,14 +90,14 @@ public class JoinOptimizer {
 
     /**
      * Estimate the cost of a join.
-     * 
+     *
      * The cost of the join should be calculated based on the join algorithm (or
      * algorithms) that you implemented for Lab 2. It should be a function of
      * the amount of data that must be read over the course of the query, as
      * well as the number of CPU opertions performed by your join. Assume that
      * the cost of a single predicate application is roughly 1.
-     * 
-     * 
+     *
+     *
      * @param j
      *            A LogicalJoinNode representing the join operation being
      *            performed.
@@ -101,24 +115,27 @@ public class JoinOptimizer {
      *         cost2
      */
     public double estimateJoinCost(LogicalJoinNode j, int card1, int card2,
-            double cost1, double cost2) {
+                                   double cost1, double cost2) {
         if (j instanceof LogicalSubplanJoinNode) {
             // A LogicalSubplanJoinNode represents a subquery.
-            // You do not need to implement proper support for these for Lab 5.
+            // You do not need to implement proper support for these for Lab 3.
             return card1 + cost1 + cost2;
         } else {
             // Insert your code here.
             // HINT: You may need to use the variable "j" if you implemented
             // a join algorithm that's more complicated than a basic
             // nested-loops join.
-            return -1.0;
+            // card1=ntups(t1) card2=ntups(t2) cost1=scancost(t1) cost2=scancost(t2)
+            // joincost(t1 join t2) = scancost(t1) + ntups(t1) x scancost(t2) //IO cost
+            //                       + ntups(t1) x ntups(t2)  //CPU cost
+            return cost1 + card1 * cost2 + card1 * card2;
         }
     }
 
     /**
      * Estimate the cardinality of a join. The cardinality of a join is the
      * number of tuples produced by the join.
-     * 
+     *
      * @param j
      *            A LogicalJoinNode representing the join operation being
      *            performed.
@@ -135,10 +152,10 @@ public class JoinOptimizer {
      * @return The cardinality of the join
      */
     public int estimateJoinCardinality(LogicalJoinNode j, int card1, int card2,
-            boolean t1pkey, boolean t2pkey, Map<String, TableStats> stats) {
+                                       boolean t1pkey, boolean t2pkey, Map<String, TableStats> stats) {
         if (j instanceof LogicalSubplanJoinNode) {
             // A LogicalSubplanJoinNode represents a subquery.
-            // You do not need to implement proper support for these for Lab 5.
+            // You do not need to implement proper support for these for Lab 3.
             return card1;
         } else {
             return estimateTableJoinCardinality(j.p, j.t1Alias, j.t2Alias,
@@ -151,52 +168,74 @@ public class JoinOptimizer {
      * Estimate the join cardinality of two tables.
      * */
     public static int estimateTableJoinCardinality(Predicate.Op joinOp,
-            String table1Alias, String table2Alias, String field1PureName,
-            String field2PureName, int card1, int card2, boolean t1pkey,
-            boolean t2pkey, Map<String, TableStats> stats,
-            Map<String, Integer> tableAliasToId) {
+                                                   String table1Alias, String table2Alias, String field1PureName,
+                                                   String field2PureName, int card1, int card2, boolean t1pkey,
+                                                   boolean t2pkey, Map<String, TableStats> stats,
+                                                   Map<String, Integer> tableAliasToId) {
         int card = 1;
         // some code goes here
+        switch (joinOp) {
+            case EQUALS:
+                if (t1pkey && !t2pkey) {
+                    card = card2;
+                } else if (!t1pkey && t2pkey) {
+                    card = card1;
+                } else if (t1pkey && t2pkey) {
+                    card = Math.min(card1, card2);
+                } else {
+                    card = Math.max(card1, card2);
+                }
+                break;
+            case NOT_EQUALS:
+                // 记录总数-等值记录数
+                if (t1pkey && !t2pkey) {
+                    card = card1 * card2 - card2;
+                } else if (!t1pkey && t2pkey) {
+                    card = card1 * card2 - card1;
+                } else if (t1pkey && t2pkey) {
+                    card = card1 * card2 - Math.min(card1, card2);
+                } else {
+                    card = card1 * card2 - Math.max(card1, card2);
+                }
+                break;
+            default:
+                // 其他记录按范围查询计算
+                card = (int) (0.3 * card1 * card2);
+        }
         return card <= 0 ? 1 : card;
     }
 
     /**
      * Helper method to enumerate all of the subsets of a given size of a
      * specified vector.
-     * 
+     *
      * @param v
      *            The vector whose subsets are desired
      * @param size
      *            The size of the subsets of interest
      * @return a set of all subsets of the specified size
      */
-    @SuppressWarnings("unchecked")
-    public <T> Set<Set<T>> enumerateSubsets(Vector<T> v, int size) {
-        Set<Set<T>> els = new HashSet<Set<T>>();
-        els.add(new HashSet<T>());
-        // Iterator<Set> it;
-        // long start = System.currentTimeMillis();
-
-        for (int i = 0; i < size; i++) {
-            Set<Set<T>> newels = new HashSet<Set<T>>();
-            for (Set<T> s : els) {
-                for (T t : v) {
-                    Set<T> news = (Set<T>) (((HashSet<T>) s).clone());
-                    if (news.add(t))
-                        newels.add(news);
-                }
-            }
-            els = newels;
-        }
-
+    public <T> Set<Set<T>> enumerateSubsets(List<T> v, int size) {
+        Set<Set<T>> els = new HashSet<>();
+        dfs(v, size, 0, els, new ArrayDeque<>());
         return els;
 
+    }
+    private <T> void dfs(List<T> list, int size, int begin, Set<Set<T>> res, Deque<T> path) {
+        if (path.size() == size) {
+            res.add(new HashSet<>(path));
+        }
+        for (int i = begin; i < list.size(); i++) {
+            path.addLast(list.get(i));
+            dfs(list, size, i + 1, res, path);
+            path.removeLast();
+        }
     }
 
     /**
      * Compute a logical, reasonably efficient join on the specified tables. See
      * PS4 for hints on how this should be implemented.
-     * 
+     *
      * @param stats
      *            Statistics for each table involved in the join, referenced by
      *            base table names, not alias
@@ -207,21 +246,45 @@ public class JoinOptimizer {
      * @param explain
      *            Indicates whether your code should explain its query plan or
      *            simply execute it
-     * @return A Vector<LogicalJoinNode> that stores joins in the left-deep
+     * @return A List<LogicalJoinNode> that stores joins in the left-deep
      *         order in which they should be executed.
      * @throws ParsingException
      *             when stats or filter selectivities is missing a table in the
      *             join, or or when another internal error occurs
      */
-    public Vector<LogicalJoinNode> orderJoins(
-            HashMap<String, TableStats> stats,
-            HashMap<String, Double> filterSelectivities, boolean explain)
+    public List<LogicalJoinNode> orderJoins(
+            Map<String, TableStats> stats,
+            Map<String, Double> filterSelectivities, boolean explain)
             throws ParsingException {
-        //Not necessary for labs 1--3
 
         // some code goes here
         //Replace the following
-        return joins;
+        PlanCache planCache = new PlanCache();
+        CostCard bestCostCard = new CostCard();
+        int size = joins.size();
+        for (int i = 1; i <= size; i++) {
+            // 找出给定size的所有子集
+            Set<Set<LogicalJoinNode>> subsets = enumerateSubsets(joins, i);
+            for (Set<LogicalJoinNode> subset : subsets) {
+                double bestCostSoFar = Double.MAX_VALUE;
+                for (LogicalJoinNode joinNode : subset) {
+                    CostCard costCard =
+                            computeCostAndCardOfSubplan(stats, filterSelectivities, joinNode, subset, bestCostSoFar, planCache);
+                    if (costCard == null) {
+                        continue;
+                    }
+                    bestCostSoFar = costCard.cost;
+                    bestCostCard = costCard;
+                }
+                if (bestCostSoFar != Double.MAX_VALUE) {
+                    planCache.addPlan(subset, bestCostCard.cost, bestCostCard.card, bestCostCard.plan);
+                }
+            }
+        }
+        if (explain) {
+            printJoins(bestCostCard.plan, planCache, stats, filterSelectivities);
+        }
+        return bestCostCard.plan;
     }
 
     // ===================== Private Methods =================================
@@ -231,7 +294,7 @@ public class JoinOptimizer {
      * joinToRemove to joinSet (joinSet should contain joinToRemove), given that
      * all of the subsets of size joinSet.size() - 1 have already been computed
      * and stored in PlanCache pc.
-     * 
+     *
      * @param stats
      *            table stats for all of the tables, referenced by table names
      *            rather than alias (see {@link #orderJoins})
@@ -258,14 +321,14 @@ public class JoinOptimizer {
      */
     @SuppressWarnings("unchecked")
     private CostCard computeCostAndCardOfSubplan(
-            HashMap<String, TableStats> stats,
-            HashMap<String, Double> filterSelectivities,
+            Map<String, TableStats> stats,
+            Map<String, Double> filterSelectivities,
             LogicalJoinNode joinToRemove, Set<LogicalJoinNode> joinSet,
             double bestCostSoFar, PlanCache pc) throws ParsingException {
 
         LogicalJoinNode j = joinToRemove;
 
-        Vector<LogicalJoinNode> prevBest;
+        List<LogicalJoinNode> prevBest;
 
         if (this.p.getTableId(j.t1Alias) == null)
             throw new ParsingException("Unknown table " + j.t1Alias);
@@ -279,8 +342,7 @@ public class JoinOptimizer {
         String table1Alias = j.t1Alias;
         String table2Alias = j.t2Alias;
 
-        Set<LogicalJoinNode> news = (Set<LogicalJoinNode>) ((HashSet<LogicalJoinNode>) joinSet)
-                .clone();
+        Set<LogicalJoinNode> news = new HashSet<>(joinSet);
         news.remove(j);
 
         double t1cost, t2cost;
@@ -288,7 +350,7 @@ public class JoinOptimizer {
         boolean leftPkey, rightPkey;
 
         if (news.isEmpty()) { // base case -- both are base relations
-            prevBest = new Vector<LogicalJoinNode>();
+            prevBest = new ArrayList<>();
             t1cost = stats.get(table1Name).estimateScanCost();
             t1card = stats.get(table1Name).estimateTableCardinality(
                     filterSelectivities.get(j.t1Alias));
@@ -299,7 +361,7 @@ public class JoinOptimizer {
             t2card = table2Alias == null ? 0 : stats.get(table2Name)
                     .estimateTableCardinality(
                             filterSelectivities.get(j.t2Alias));
-            rightPkey = table2Alias == null ? false : isPkey(table2Alias,
+            rightPkey = table2Alias != null && isPkey(table2Alias,
                     j.f2PureName);
         } else {
             // news is not empty -- figure best way to join j to news
@@ -317,7 +379,7 @@ public class JoinOptimizer {
             // estimate cost of right subtree
             if (doesJoin(prevBest, table1Alias)) { // j.t1 is in prevBest
                 t1cost = prevBestCost; // left side just has cost of whatever
-                                       // left
+                // left
                 // subtree is
                 t1card = bestCard;
                 leftPkey = hasPkey(prevBest);
@@ -327,13 +389,13 @@ public class JoinOptimizer {
                 t2card = j.t2Alias == null ? 0 : stats.get(table2Name)
                         .estimateTableCardinality(
                                 filterSelectivities.get(j.t2Alias));
-                rightPkey = j.t2Alias == null ? false : isPkey(j.t2Alias,
+                rightPkey = j.t2Alias != null && isPkey(j.t2Alias,
                         j.f2PureName);
             } else if (doesJoin(prevBest, j.t2Alias)) { // j.t2 is in prevbest
-                                                        // (both
+                // (both
                 // shouldn't be)
                 t2cost = prevBestCost; // left side just has cost of whatever
-                                       // left
+                // left
                 // subtree is
                 t2card = bestCard;
                 rightPkey = hasPkey(prevBest);
@@ -370,8 +432,8 @@ public class JoinOptimizer {
         cc.card = estimateJoinCardinality(j, t1card, t2card, leftPkey,
                 rightPkey, stats);
         cc.cost = cost1;
-        cc.plan = (Vector<LogicalJoinNode>) prevBest.clone();
-        cc.plan.addElement(j); // prevbest is left -- add new join to end
+        cc.plan = new Vector<>(prevBest);
+        cc.plan.add(j); // prevbest is left -- add new join to end
         return cc;
     }
 
@@ -379,7 +441,7 @@ public class JoinOptimizer {
      * Return true if the specified table is in the list of joins, false
      * otherwise
      */
-    private boolean doesJoin(Vector<LogicalJoinNode> joinlist, String table) {
+    private boolean doesJoin(List<LogicalJoinNode> joinlist, String table) {
         for (LogicalJoinNode j : joinlist) {
             if (j.t1Alias.equals(table)
                     || (j.t2Alias != null && j.t2Alias.equals(table)))
@@ -391,7 +453,7 @@ public class JoinOptimizer {
     /**
      * Return true if field is a primary key of the specified table, false
      * otherwise
-     * 
+     *
      * @param tableAlias
      *            The alias of the table in the query
      * @param field
@@ -408,7 +470,7 @@ public class JoinOptimizer {
      * Return true if a primary key field is joined by one of the joins in
      * joinlist
      */
-    private boolean hasPkey(Vector<LogicalJoinNode> joinlist) {
+    private boolean hasPkey(List<LogicalJoinNode> joinlist) {
         for (LogicalJoinNode j : joinlist) {
             if (isPkey(j.t1Alias, j.f1PureName)
                     || (j.t2Alias != null && isPkey(j.t2Alias, j.f2PureName)))
@@ -422,7 +484,7 @@ public class JoinOptimizer {
      * Helper function to display a Swing window with a tree representation of
      * the specified list of joins. See {@link #orderJoins}, which may want to
      * call this when the analyze flag is true.
-     * 
+     *
      * @param js
      *            the join plan to visualize
      * @param pc
@@ -434,9 +496,9 @@ public class JoinOptimizer {
      *            (where tables are indentified by their alias or name if no
      *            alias is given)
      */
-    private void printJoins(Vector<LogicalJoinNode> js, PlanCache pc,
-            HashMap<String, TableStats> stats,
-            HashMap<String, Double> selectivities) {
+    private void printJoins(List<LogicalJoinNode> js, PlanCache pc,
+                            Map<String, TableStats> stats,
+                            Map<String, Double> selectivities) {
 
         JFrame f = new JFrame("Join Plan for " + p.getQuery());
 
@@ -448,13 +510,13 @@ public class JoinOptimizer {
 
         f.setSize(300, 500);
 
-        HashMap<String, DefaultMutableTreeNode> m = new HashMap<String, DefaultMutableTreeNode>();
+        Map<String, DefaultMutableTreeNode> m = new HashMap<>();
 
         // int numTabs = 0;
 
         // int k;
         DefaultMutableTreeNode root = null, treetop = null;
-        HashSet<LogicalJoinNode> pathSoFar = new HashSet<LogicalJoinNode>();
+        HashSet<LogicalJoinNode> pathSoFar = new HashSet<>();
         boolean neither;
 
         System.out.println(js);
@@ -480,7 +542,7 @@ public class JoinOptimizer {
                         + stats.get(table1Name).estimateScanCost()
                         + ", card = "
                         + stats.get(table1Name).estimateTableCardinality(
-                                selectivities.get(j.t1Alias)) + ")");
+                        selectivities.get(j.t1Alias)) + ")");
                 root.add(n);
             } else {
                 // make left child root n
@@ -495,14 +557,14 @@ public class JoinOptimizer {
                 n = new DefaultMutableTreeNode(
                         j.t2Alias == null ? "Subplan"
                                 : (j.t2Alias
-                                        + " (Cost = "
-                                        + stats.get(table2Name)
-                                                .estimateScanCost()
-                                        + ", card = "
-                                        + stats.get(table2Name)
-                                                .estimateTableCardinality(
-                                                        selectivities
-                                                                .get(j.t2Alias)) + ")"));
+                                + " (Cost = "
+                                + stats.get(table2Name)
+                                .estimateScanCost()
+                                + ", card = "
+                                + stats.get(table2Name)
+                                .estimateTableCardinality(
+                                        selectivities
+                                                .get(j.t2Alias)) + ")"));
                 root.add(n);
             } else {
                 // make right child root n
